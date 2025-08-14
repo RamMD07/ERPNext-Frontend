@@ -19,7 +19,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const userData = await frappeAPI.login(username, password)
       user.value = userData
-      localStorage.setItem('frappe_session', JSON.stringify(userData))
+      return userData
     } catch (error) {
       console.error('Login failed:', error)
       throw error
@@ -35,49 +35,23 @@ export const useAuthStore = defineStore('auth', () => {
       console.error('Logout error:', error)
     } finally {
       user.value = null
-      localStorage.removeItem('frappe_session')
-    }
-  }
-
-  const setUser = (userData: User | null) => {
-    user.value = userData
-    if (userData) {
-      localStorage.setItem('frappe_session', JSON.stringify(userData))
-    } else {
-      localStorage.removeItem('frappe_session')
     }
   }
 
   const checkAuth = async () => {
     try {
       const userData = await frappeAPI.getCurrentUser()
-      setUser(userData)
+      user.value = userData
+      return userData
     } catch (error) {
       console.error('Auth check failed:', error)
-      setUser(null)
+      user.value = null
+      throw error
     }
   }
 
-  const hasRole = (role: string) => {
-    return userRoles.value.includes(role)
-  }
-
-  const hasAnyRole = (roles: string[]) => {
-    return roles.some(role => userRoles.value.includes(role))
-  }
-
-  // Initialize from localStorage
   const initAuth = () => {
-    const stored = localStorage.getItem('frappe_session')
-    if (stored) {
-      try {
-        const userData = JSON.parse(stored)
-        user.value = userData
-      } catch (error) {
-        console.error('Failed to parse stored user data:', error)
-        localStorage.removeItem('frappe_session')
-      }
-    }
+    frappeAPI.initSession()
   }
 
   return {
@@ -93,10 +67,13 @@ export const useAuthStore = defineStore('auth', () => {
     // Actions
     login,
     logout,
-    setUser,
     checkAuth,
-    hasRole,
-    hasAnyRole,
     initAuth
+  }
+}, {
+  persist: {
+    key: 'auth-store',
+    storage: localStorage,
+    paths: ['user']
   }
 })

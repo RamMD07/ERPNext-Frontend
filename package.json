@@ -18,5 +18,9 @@
     "typescript": "^5.5.3",
     "vite": "^5.4.2",
     "vue-tsc": "^2.0.0"
+  },
+  "dependencies": {
+    "@vueuse/core": "^13.6.0",
+    "pinia-plugin-persistedstate": "^4.5.0"
   }
 }

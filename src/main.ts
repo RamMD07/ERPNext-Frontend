@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
+import piniaPluginPersistedstate from 'pinia-plugin-persistedstate'
 import { createRouter, createWebHistory } from 'vue-router'
 import { FrappeUI } from 'frappe-ui'
 import App from './App.vue'
@@ -14,6 +15,7 @@ const router = createRouter({
 
 // Create pinia store
 const pinia = createPinia()
+pinia.use(piniaPluginPersistedstate)
 
 // Create app
 const app = createApp(App)

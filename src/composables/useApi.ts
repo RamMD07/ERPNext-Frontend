@@ -1,145 +1,107 @@
 import { ref, computed } from 'vue'
-import axios, { type AxiosInstance, type AxiosRequestConfig, type AxiosResponse } from 'axios'
-import type { FrappeResponse, DocType, Document, User, ListViewSettings } from '@/types/frappe'
+import type { FrappeResponse, DocType, Document, User } from '@/types/frappe'
 
 class FrappeAPI {
-  private client: AxiosInstance
   private baseURL: string
-  private csrf_token = ref<string>()
+  private sessionId: string | null = null
 
   constructor(baseURL: string = 'http://localhost:8000') {
     this.baseURL = baseURL
-    this.client = axios.create({
-      baseURL: this.baseURL,
-      timeout: 30000,
-      withCredentials: true,
+  }
+
+  private async makeRequest<T = any>(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<T> {
+    const url = `${this.baseURL}${endpoint}`
+    
+    const defaultHeaders: Record<string, string> = {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    }
+
+    // Add session cookie if available
+    if (this.sessionId) {
+      defaultHeaders['Cookie'] = `sid=${this.sessionId}`
+    }
+
+    const config: RequestInit = {
+      ...options,
       headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
+        ...defaultHeaders,
+        ...options.headers,
       },
-    })
+      credentials: 'include', // Important for session cookies
+    }
 
-    this.setupInterceptors()
-  }
-
-  private setupInterceptors() {
-    // Request interceptor for CSRF token
-    this.client.interceptors.request.use((config) => {
-      if (this.csrf_token.value) {
-        config.headers['X-Frappe-CSRF-Token'] = this.csrf_token.value
+    try {
+      const response = await fetch(url, config)
+      
+      // Handle authentication errors
+      if (response.status === 401) {
+        this.sessionId = null
+        localStorage.removeItem('frappe_session')
+        throw new Error('Authentication required')
       }
-      return config
-    })
 
-    // Response interceptor for error handling
-    this.client.interceptors.response.use(
-      (response) => response,
-      (error) => {
-        if (error.response?.status === 401) {
-          this.handleAuthError()
-        }
-        return Promise.reject(error)
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
       }
-    )
-  }
 
-  private handleAuthError() {
-    localStorage.removeItem('frappe_session')
-    window.location.href = '/login'
+      const data: FrappeResponse<T> = await response.json()
+      
+      if (data.exc) {
+        throw new Error(data.exc)
+      }
+
+      return data.message
+    } catch (error) {
+      console.error('API Request failed:', error)
+      throw error
+    }
   }
 
   async login(username: string, password: string): Promise<User> {
-    const response = await this.client.post('/api/method/login', {
-      usr: username,
-      pwd: password,
-    })
+    try {
+      const response = await this.makeRequest<any>('/api/method/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          usr: username,
+          pwd: password,
+        }),
+      })
 
-    if (response.data.message) {
-      this.csrf_token.value = response.headers['x-frappe-csrf-token']
-      return response.data.message
+      // Store session info
+      this.sessionId = response.sid || 'logged_in'
+      localStorage.setItem('frappe_session', this.sessionId)
+      
+      // Get user info after login
+      const userInfo = await this.getCurrentUser()
+      return userInfo
+    } catch (error) {
+      throw new Error('Invalid username or password')
     }
-    
-    throw new Error('Login failed')
   }
 
   async logout(): Promise<void> {
-    await this.client.post('/api/method/logout')
-    this.csrf_token.value = undefined
-    localStorage.removeItem('frappe_session')
+    try {
+      await this.makeRequest('/api/method/logout', {
+        method: 'POST',
+      })
+    } finally {
+      this.sessionId = null
+      localStorage.removeItem('frappe_session')
+    }
   }
 
   async getCurrentUser(): Promise<User> {
-    const response = await this.call<User>('frappe.auth.get_logged_user')
-    return response
+    return this.makeRequest<User>('/api/method/frappe.auth.get_logged_user')
   }
 
-  // Generic method caller
-  async call<T = any>(
-    method: string, 
-    args: Record<string, any> = {},
-    httpMethod: 'GET' | 'POST' = 'POST'
-  ): Promise<T> {
-    const config: AxiosRequestConfig = {
-      url: '/api/method/' + method,
-      method: httpMethod,
-    }
-
-    if (httpMethod === 'GET') {
-      config.params = args
-    } else {
-      config.data = args
-    }
-
-    const response: AxiosResponse<FrappeResponse<T>> = await this.client(config)
-    
-    if (response.data.exc) {
-      throw new Error(response.data.exc)
-    }
-
-    return response.data.message
-  }
-
-  // DocType operations
   async getDocType(doctype: string): Promise<DocType> {
-    return this.call<DocType>('frappe.desk.form.meta.get_meta', { doctype })
+    return this.makeRequest<DocType>(`/api/method/frappe.desk.form.meta.get_meta?doctype=${encodeURIComponent(doctype)}`)
   }
 
-  async getDoc(doctype: string, name: string): Promise<Document> {
-    return this.call<Document>('frappe.desk.form.load.getdoc', { 
-      doctype, 
-      name,
-      check_links: 1 
-    })
-  }
-
-  async saveDoc(doc: Partial<Document>): Promise<Document> {
-    return this.call<Document>('frappe.desk.form.save.savedocs', {
-      action: doc.name ? 'Update' : 'Save',
-      doc: JSON.stringify(doc),
-    })
-  }
-
-  async deleteDoc(doctype: string, name: string): Promise<void> {
-    await this.call('frappe.model.delete_doc', { doctype, name })
-  }
-
-  async submitDoc(doctype: string, name: string): Promise<Document> {
-    return this.call<Document>('frappe.model.workflow.bulk_workflow_approval', {
-      doctype,
-      docnames: [name],
-      action: 'Submit'
-    })
-  }
-
-  async cancelDoc(doctype: string, name: string): Promise<Document> {
-    return this.call<Document>('frappe.model.workflow.bulk_workflow_approval', {
-      doctype,
-      docnames: [name], 
-      action: 'Cancel'
-    })
-  }
-
-  // List operations
   async getList(
     doctype: string,
     options: {
@@ -148,105 +110,40 @@ class FrappeAPI {
       order_by?: string
       limit_start?: number
       limit_page_length?: number
-      group_by?: string
-      as_dict?: boolean
     } = {}
   ): Promise<Document[]> {
-    return this.call<Document[]>('frappe.desk.reportview.get', {
+    const params = new URLSearchParams({
       doctype,
       fields: JSON.stringify(options.fields || ['name']),
       filters: JSON.stringify(options.filters || {}),
       order_by: options.order_by || 'creation desc',
-      start: options.limit_start || 0,
-      page_length: options.limit_page_length || 20,
-      group_by: options.group_by,
-      as_dict: options.as_dict !== false,
+      start: String(options.limit_start || 0),
+      page_length: String(options.limit_page_length || 20),
+    })
+
+    return this.makeRequest<Document[]>(`/api/method/frappe.desk.reportview.get?${params}`)
+  }
+
+  async getDoc(doctype: string, name: string): Promise<Document> {
+    return this.makeRequest<Document>(`/api/method/frappe.desk.form.load.getdoc?doctype=${encodeURIComponent(doctype)}&name=${encodeURIComponent(name)}`)
+  }
+
+  async saveDoc(doc: Partial<Document>): Promise<Document> {
+    return this.makeRequest<Document>('/api/method/frappe.desk.form.save.savedocs', {
+      method: 'POST',
+      body: JSON.stringify({
+        action: doc.name ? 'Update' : 'Save',
+        doc: JSON.stringify(doc),
+      }),
     })
   }
 
-  async getListViewSettings(doctype: string): Promise<ListViewSettings> {
-    return this.call<ListViewSettings>('frappe.desk.listview.get_list_settings', { 
-      doctype 
-    })
-  }
-
-  // Search operations
-  async search(
-    doctype: string, 
-    query: string, 
-    filters: Record<string, any> = {}
-  ): Promise<any[]> {
-    return this.call('frappe.desk.search.search_link', {
-      doctype,
-      txt: query,
-      filters: JSON.stringify(filters),
-    })
-  }
-
-  // File operations
-  async uploadFile(file: File, doctype?: string, docname?: string): Promise<any> {
-    const formData = new FormData()
-    formData.append('file', file)
-    if (doctype) formData.append('doctype', doctype)
-    if (docname) formData.append('docname', docname)
-
-    const response = await this.client.post('/api/method/upload_file', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    })
-
-    return response.data.message
-  }
-
-  // Validation
-  async validateDoc(doc: Partial<Document>): Promise<any> {
-    return this.call('frappe.desk.form.utils.validate_doc', {
-      doc: JSON.stringify(doc)
-    })
-  }
-
-  // Client scripts
-  async getClientScript(doctype: string, view: string = 'Form'): Promise<string> {
-    const scripts = await this.call<any[]>('frappe.desk.form.utils.get_client_scripts', {
-      doctype,
-      view
-    })
-    
-    return scripts.map(script => script.script).join('\n')
-  }
-
-  // Real-time updates
-  setupWebSocket(): WebSocket | null {
-    try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`)
-      
-      ws.onopen = () => {
-        console.log('WebSocket connected')
-      }
-      
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          this.handleRealtimeUpdate(data)
-        } catch (e) {
-          console.error('Failed to parse WebSocket message:', e)
-        }
-      }
-      
-      return ws
-    } catch (error) {
-      console.error('WebSocket connection failed:', error)
-      return null
+  // Initialize session from localStorage
+  initSession() {
+    const stored = localStorage.getItem('frappe_session')
+    if (stored) {
+      this.sessionId = stored
     }
-  }
-
-  private handleRealtimeUpdate(data: any) {
-    // Emit custom events for real-time updates
-    window.dispatchEvent(new CustomEvent('frappe:doc_update', { 
-      detail: data 
-    }))
   }
 }
 
